@@ -1,5 +1,7 @@
 import formidable from "formidable";
 import { readFile } from "node:fs/promises";
+import { Ratelimit } from "@upstash/ratelimit";
+import { Redis } from "@upstash/redis";
 
 // Vercel: let formidable read the multipart body, not the default parser
 export const config = { api: { bodyParser: false } };
@@ -20,24 +22,115 @@ Return STRICT JSON only, no prose, with this exact shape:
 }
 If you cannot find a cable, return {"polyline": [], "crossings": [], "endpoints": []}.`;
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+// --- Origin allowlist -------------------------------------------------------
+// The Framer site is always allowed. Add the production custom domain (if any)
+// via the ALLOWED_ORIGINS env var (comma-separated) without touching code.
+const ALLOWED_ORIGINS = [
+  "https://gray-card-413823.framer.app",
+  ...(process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
+    : []),
+];
+
+// --- Rate limiting (Upstash Redis, sliding window) --------------------------
+// Two independent limits per caller IP; a request is rejected if EITHER trips.
+// Lazily built so the function still boots if the Upstash env vars aren't set
+// yet (rate limiting simply stays inactive until they exist).
+const SHORT_LIMIT = 10; // requests / 60s
+const DAILY_LIMIT = 50; // requests / 1 day
+
+let _limiters = null;
+function getLimiters() {
+  if (_limiters) return _limiters;
+  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+    return null;
+  }
+  // Redis.fromEnv() reads UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN.
+  const redis = Redis.fromEnv();
+  _limiters = {
+    short: new Ratelimit({
+      redis,
+      limiter: Ratelimit.slidingWindow(SHORT_LIMIT, "60 s"),
+      prefix: "rl:short",
+      analytics: false,
+    }),
+    daily: new Ratelimit({
+      redis,
+      limiter: Ratelimit.slidingWindow(DAILY_LIMIT, "1 d"),
+      prefix: "rl:daily",
+      analytics: false,
+    }),
+  };
+  return _limiters;
+}
+
+function getClientIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  const value = Array.isArray(xff) ? xff[0] : xff || "";
+  const first = value.split(",")[0].trim();
+  return first || "anonymous";
 }
 
 export default async function handler(req, res) {
-  setCors(res);
-  if (req.method === "OPTIONS") return res.status(204).end();
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+  const origin = req.headers.origin || "";
+  const originAllowed = ALLOWED_ORIGINS.includes(origin);
 
-  // Optional shared secret: set SHARED_SECRET in Vercel and the same value as the
-  // uploader's API key to keep the endpoint private.
-  if (process.env.SHARED_SECRET) {
-    const auth = req.headers.authorization || "";
-    if (auth !== `Bearer ${process.env.SHARED_SECRET}`) {
-      return res.status(401).json({ error: "Unauthorized" });
+  // CORS headers — only ever echo an allowed origin back.
+  if (originAllowed) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  }
+
+  // CORS preflight: allowed origins get a clean 204, everyone else 403.
+  if (req.method === "OPTIONS") {
+    return res.status(originAllowed ? 204 : 403).end();
+  }
+
+  // 1) Cheap origin allowlist check — runs before anything expensive.
+  if (!originAllowed) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // 2) Rate limit BEFORE any Gemini call so blocked requests cost nothing.
+  const ip = getClientIp(req);
+  const limiters = getLimiters();
+  if (limiters) {
+    try {
+      // Short window first; if it trips we don't consume the daily budget.
+      const short = await limiters.short.limit(ip);
+      if (!short.success) {
+        res.setHeader("X-RateLimit-Limit", SHORT_LIMIT);
+        res.setHeader("X-RateLimit-Remaining", Math.max(0, short.remaining));
+        return res.status(429).json({ error: "Too many requests, slow down." });
+      }
+
+      const daily = await limiters.daily.limit(ip);
+      if (!daily.success) {
+        res.setHeader("X-RateLimit-Limit", DAILY_LIMIT);
+        res.setHeader("X-RateLimit-Remaining", Math.max(0, daily.remaining));
+        return res.status(429).json({ error: "Too many requests, slow down." });
+      }
+
+      // Surface the more constrained of the two windows on successful requests.
+      if (short.remaining <= daily.remaining) {
+        res.setHeader("X-RateLimit-Limit", SHORT_LIMIT);
+        res.setHeader("X-RateLimit-Remaining", Math.max(0, short.remaining));
+      } else {
+        res.setHeader("X-RateLimit-Limit", DAILY_LIMIT);
+        res.setHeader("X-RateLimit-Remaining", Math.max(0, daily.remaining));
+      }
+    } catch (err) {
+      // Fail open: a Redis hiccup should not take the endpoint down. Log and continue.
+      console.error("Rate limiter error, allowing request:", err?.message || err);
     }
+  } else {
+    console.warn("Upstash env vars missing; rate limiting is inactive.");
   }
 
   try {
