@@ -9,18 +9,39 @@ export const config = { api: { bodyParser: false } };
 const GEMINI_MODEL = "gemini-2.5-pro";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-const PROMPT = `You are a cable-tracing vision system. The image shows a tangled pair of
-earbuds/EarPods with a thin cable. Trace the single main cable from one end to the other.
+const PROMPT = `You are a precise cable-tracing vision system. The image shows a tangled pair of
+earbuds/EarPods: two earbud housings joined by a single thin cable that may split into a
+Y near one end. Your job is to trace that ONE continuous main cable accurately.
 
-Return STRICT JSON only, no prose, with this exact shape:
+Coordinate system: all positions are normalized floats in [0,1]. x = left(0) to right(1),
+y = top(0) to bottom(1). Origin (0,0) is the top-left corner.
+
+How to trace:
+1. First locate the two visible cable ENDS (an earbud tip, or the plug/Y-junction). These are
+   the endpoints. Put the end nearest the top-left first.
+2. Starting from the first endpoint, follow ONE single continuous strand to the other endpoint,
+   sampling ordered points along the cable centerline. Do not jump between separate strands.
+3. Sample densely where the cable curves or crosses, sparsely on straight runs. Use 16-60 points.
+   Points MUST be in path order along the strand, not sorted by position.
+
+Crossings (where the cable visually passes over itself):
+- Add one entry per visual self-crossing. x,y is the crossing location.
+- overStrandIndex / underStrandIndex are indices INTO your polyline array identifying the two
+  points nearest where the OVER strand and UNDER strand pass. The over strand is the one visibly
+  on top (unbroken); the under strand is partially occluded.
+- confidence in [0,1]: how sure you are about the over/under ordering. Use < 0.5 when the depth
+  ordering is genuinely ambiguous; do NOT guess high.
+- Only report real over/under crossings. Do not report the Y-split or two cables merely touching.
+
+Return STRICT JSON only, no prose, no markdown fences, with this exact shape:
 {
-  "polyline": [[x, y], ...],           // ordered points along the cable, 12-60 points, each normalized 0..1 (x=left→right, y=top→bottom)
-  "crossings": [                       // points where the cable visually crosses over itself
+  "polyline": [[x, y], ...],
+  "crossings": [
     { "x": 0..1, "y": 0..1, "overStrandIndex": int, "underStrandIndex": int, "confidence": 0..1 }
   ],
-  "endpoints": [[x, y], [x, y]]        // the two visible ends of the cable, normalized 0..1
+  "endpoints": [[x, y], [x, y]]
 }
-If you cannot find a cable, return {"polyline": [], "crossings": [], "endpoints": []}.`;
+If no cable is clearly visible, return {"polyline": [], "crossings": [], "endpoints": []}.`;
 
 // --- Origin allowlist -------------------------------------------------------
 // The Framer site is always allowed. Add the production custom domain (if any)
