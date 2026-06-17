@@ -127,6 +127,29 @@ function parseEndpoints(value: unknown): Point[] {
     return value.map(asPoint).filter((p): p is Point => p !== null).slice(0, 2)
 }
 
+async function downscaleImage(file: File, maxEdge: number, quality: number): Promise<Blob> {
+    if (typeof window === "undefined" || typeof document === "undefined") return file
+    try {
+        const bitmap = await createImageBitmap(file)
+        const longest = Math.max(bitmap.width, bitmap.height)
+        const scale = Math.min(1, maxEdge / longest)
+        const width = Math.max(1, Math.round(bitmap.width * scale))
+        const height = Math.max(1, Math.round(bitmap.height * scale))
+        const canvas = document.createElement("canvas")
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext("2d")
+        if (!ctx) return file
+        ctx.drawImage(bitmap, 0, 0, width, height)
+        const blob = await new Promise<Blob | null>((resolve) => {
+            canvas.toBlob(resolve, "image/jpeg", quality)
+        })
+        return blob ?? file
+    } catch {
+        return file
+    }
+}
+
 function distance(a: Point, b: Point): number {
     const dx = a[0] - b[0]
     const dy = a[1] - b[1]
@@ -547,6 +570,8 @@ interface MyComponentProps {
     cameraButtonLabel: string
     uploadButtonLabel: string
     fallbackNoteText: string
+    maxImageSize: number
+    imageQuality: number
 }
 
 /**
@@ -573,6 +598,8 @@ export default function EarPodsUploader(props: MyComponentProps) {
         cameraButtonLabel,
         uploadButtonLabel,
         fallbackNoteText,
+        maxImageSize,
+        imageQuality,
     } = props
 
     const [previewUrl, setPreviewUrl] = useState<string | null>(null)
@@ -657,8 +684,18 @@ export default function EarPodsUploader(props: MyComponentProps) {
                     timeoutId = window.setTimeout(() => {
                         abortController.abort()
                     }, timeoutMs)
+                    let uploadBlob: Blob = file
+                    try {
+                        uploadBlob = await downscaleImage(
+                            file,
+                            Math.round(maxImageSize),
+                            imageQuality
+                        )
+                    } catch {
+                        uploadBlob = file
+                    }
                     const formData = new FormData()
-                    formData.append("image", file)
+                    formData.append("image", uploadBlob, "earpods.jpg")
                     const headers: Record<string, string> = {}
                     if (visionApiKey.trim()) headers.Authorization = `Bearer ${visionApiKey.trim()}`
                     const response = await fetch(visionApiUrl, {
@@ -720,7 +757,15 @@ export default function EarPodsUploader(props: MyComponentProps) {
                 }
             }
         },
-        [analysisTimeoutSeconds, confidenceThreshold, enableAnalysis, visionApiKey, visionApiUrl]
+        [
+            analysisTimeoutSeconds,
+            confidenceThreshold,
+            enableAnalysis,
+            visionApiKey,
+            visionApiUrl,
+            maxImageSize,
+            imageQuality,
+        ]
     )
 
     const applyFile = useCallback(
@@ -1501,5 +1546,21 @@ addPropertyControls(EarPodsUploader, {
         defaultValue:
             "Automatic analysis couldn’t get a confident read this time. Please follow the general untangling steps below, or try a clearer, well-lit photo on a plain background.",
         displayTextArea: true,
+    },
+    maxImageSize: {
+        type: ControlType.Number,
+        title: "Max Image Size (px)",
+        defaultValue: 1280,
+        min: 640,
+        max: 2560,
+        step: 1,
+    },
+    imageQuality: {
+        type: ControlType.Number,
+        title: "Image Quality",
+        defaultValue: 0.82,
+        min: 0.5,
+        max: 1,
+        step: 0.01,
     },
 })
