@@ -42,11 +42,14 @@ const DAILY_LIMIT = 50; // requests / 1 day
 let _limiters = null;
 function getLimiters() {
   if (_limiters) return _limiters;
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
+  // The Vercel<>Upstash Marketplace integration provisions KV_REST_API_* names;
+  // a manual Upstash setup uses UPSTASH_REDIS_REST_*. Accept either.
+  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+  if (!url || !token) {
     return null;
   }
-  // Redis.fromEnv() reads UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN.
-  const redis = Redis.fromEnv();
+  const redis = new Redis({ url, token });
   _limiters = {
     short: new Ratelimit({
       redis,
