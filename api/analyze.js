@@ -3,10 +3,11 @@ import { readFile } from "node:fs/promises";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 
-// Vercel: let formidable read the multipart body, not the default parser
-export const config = { api: { bodyParser: false } };
+// Vercel: let formidable read the multipart body, not the default parser.
+// maxDuration gives gemini-2.5-pro headroom so the function isn't killed early.
+export const config = { api: { bodyParser: false }, maxDuration: 60 };
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL = "gemini-2.5-pro";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const PROMPT = `You are a precise cable-tracing vision system. The image shows a tangled pair of
