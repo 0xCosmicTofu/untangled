@@ -78,17 +78,21 @@ export default async function handler(req, res) {
   const origin = req.headers.origin || "";
   const originAllowed = ALLOWED_ORIGINS.includes(origin);
 
-  // CORS headers — only ever echo an allowed origin back.
+  // CORS headers — only ever echo an allowed origin back. Set here so they
+  // ride on EVERY response from this handler (200 success, 429, etc.), which
+  // is what lets the browser read the real status instead of "Load failed".
   if (originAllowed) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "authorization, content-type");
+    res.setHeader("Access-Control-Max-Age", "86400");
   }
 
-  // CORS preflight: allowed origins get a clean 204, everyone else 403.
+  // 0) CORS preflight first — always answer 204. Allowed origins get the CORS
+  // headers above; disallowed ones get a 204 with no ACAO (browser denies it).
   if (req.method === "OPTIONS") {
-    return res.status(originAllowed ? 204 : 403).end();
+    return res.status(204).end();
   }
 
   // 1) Cheap origin allowlist check — runs before anything expensive.
